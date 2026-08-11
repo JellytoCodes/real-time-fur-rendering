@@ -1,246 +1,215 @@
-# TechDemo Real-Time Fur Rendering
+# Real-Time Fur Rendering
 
-Unreal Engine에서 **Shell Texturing** 기법을 활용해 실시간 Fur Rendering을 구현한 기술 데모입니다.
+> **Unreal Engine 5.7에서 Shell Texturing을 Skeletal Mesh에 적용한 1인 렌더링 기술 데모**입니다.  
+> Static Mesh에서 Layer 값 전달 방식을 먼저 검증한 뒤, Leader Pose와 Layer별 Material Instance를 사용해 애니메이션을 재생하는 캐릭터로 확장했습니다.
 
-본 프로젝트는 완성형 게임이 아니라,
-Static Mesh에서 검증한 Shell Rendering 구조를 Skeletal Mesh에 확장 적용하고,
-그 과정에서 발생하는 파이프라인 제약과 성능 한계를 확인하기 위한 **Rendering Tech Demo**입니다.
+## 프로젝트 개요
 
----
+| 항목 | 내용 |
+| --- | --- |
+| 개발 기간 | 2026.05–2026.06 |
+| 개발 인원 | 1인 개발 |
+| 엔진 | Unreal Engine 5.7 |
+| 구현 | Blueprint / Material Graph |
+| 기법 | Shell Texturing |
+| 적용 대상 | Static Mesh 검증 → Skeletal Mesh 확장 |
 
-## Project Info
+이 데모의 목적은 Fur System을 범용화하는 것이 아니라, 다음 두 조건을 UE5 Blueprint와 Material Graph 안에서 함께 만족시키는 것이었습니다.
 
-| 항목               | 내용                          |
-| ---------------- | --------------------------- |
-| Engine           | Unreal Engine 5             |
-| Implementation   | Blueprint / Material Graph  |
-| Rendering Method | Shell Texturing             |
-| Target Mesh      | Static Mesh / Skeletal Mesh |
-| Development Type | Solo Tech Demo              |
-| Period           | 2026.05 ~ 2026.06           |
-
----
-
-## Overview
-
-Shell Texturing은 동일한 Mesh를 여러 겹으로 렌더링하고,
-각 Layer를 Vertex Normal 방향으로 조금씩 확장하여 털, 잔디, 솜털 같은 표면 디테일을 표현하는 방식입니다.
-
-본 데모에서는 먼저 Static Mesh 기반으로 Shell Layer 구조를 검증한 뒤,
-이를 Skeletal Mesh에 적용하는 과정을 진행했습니다.
-
-Static Mesh에서는 `Instanced Static Mesh`와 `PerInstanceCustomData`를 이용해 각 Shell Layer의 값을 Material에 전달했습니다.
-
-하지만 Skeletal Mesh에서는 동일한 Instancing 구조를 그대로 적용하기 어렵다고 판단했고,
-Blueprint 기반의 `Multi-Layer SkeletalMeshComponent` 구조로 우회 구현했습니다.
+- 모든 Shell이 원본 캐릭터와 같은 Bone Pose를 따라갈 것
+- 각 Shell이 서로 다른 `ShellIndex` 값을 Material에 전달할 것
 
 ---
 
-## Implementation Decision
+## 구현 결과
 
-Unreal Engine의 `InstancedSkinnedMeshComponent`를 검토했지만,
-해당 구조는 다수의 단순 Skeletal Mesh 인스턴스를 효율적으로 처리하는 데 초점이 있는 구조로 보았습니다.
+현재 Skeletal Blueprint는 하나의 Source Mesh와 64개의 Shell Layer를 사용합니다.
 
-본 데모에서는 군중 렌더링보다 다음 요소들이 더 중요했습니다.
+- Source Mesh에서 Animation 재생
+- 모든 Shell이 Leader Pose로 Source Mesh의 Bone Pose 공유
+- Shell별 Dynamic Material Instance 생성
+- `ShellIndex`와 `ShellCount`를 Layer마다 개별 전달
+- Vertex Normal 방향 WPO로 Layer 확장
+- Opacity Mask로 Fur 패턴 생성
+- Growth Mask로 Fur 적용 부위 제한
 
-* Shell Layer별 WPO 제어
-* ShellIndex 기반 LayerRatio 계산
-* Opacity Mask 기반 털 밀도 제어
-* Growth Mask 기반 털 생성 영역 제한
-* Skeletal Mesh 애니메이션 Pose 동기화
-
-따라서 `SkeletalMeshComponent`를 Layer 수만큼 생성하고,
-`Leader Pose Component`를 통해 SourceMesh와 동기화하는 방식을 선택했습니다.
-
----
-
-## Rendering Structure
-
-Skeletal Mesh 버전에서는 하나의 SourceMesh를 기준으로 여러 Shell Component를 생성합니다.
-
-```text
-BP_ShellFur_Skeletal
-├─ SourceMesh
-├─ ShellMesh_00
-├─ ShellMesh_01
-├─ ShellMesh_02
-└─ ShellMesh_N
+```mermaid
+flowchart LR
+    Source["Source Mesh<br/>Animation 재생"] --> Leader["Leader Pose"]
+    Leader --> Shells["Layer별 SkeletalMeshComponent"]
+    Shells --> DMI["Layer별 Dynamic Material Instance"]
+    DMI --> Params["ShellIndex · ShellCount"]
+    Params --> Material["WPO · Opacity Mask · Growth Mask"]
 ```
 
-각 Shell Component는 다음 과정을 통해 초기화됩니다.
+---
+
+## 1. Static Mesh에서 Layer 값 전달 검증
+
+먼저 `InstancedStaticMeshComponent`에 같은 Mesh Instance를 여러 개 추가하고, `PerInstanceCustomData`로 Layer 값을 전달했습니다.
 
 ```text
-Add SkeletalMeshComponent
-→ Attach To SourceMesh
-→ Set Skeletal Mesh Asset
-→ Set Leader Pose Component
-→ Disable Collision
-→ Disable Shadow
-→ Create Dynamic Material Instance
-→ Set ShellIndex / ShellCount
+Instance 생성
+  -> Instance별 ShellIndex 기록
+  -> Material에서 PerInstanceCustomData 조회
+  -> LayerRatio 계산
+  -> Vertex Normal 방향으로 위치 확장
 ```
 
-`SourceMesh`는 실제 Skeletal Mesh와 Animation을 담당하고,
-각 Shell Component는 `Leader Pose Component`를 통해 동일한 애니메이션 Pose를 공유합니다.
+이 단계에서 다음 요소를 분리해 확인했습니다.
+
+- 같은 Geometry를 여러 Layer로 겹치는 구조
+- Layer별로 다른 Scalar 값을 Material에 전달하는 경로
+- WPO와 Opacity Mask가 Fur 실루엣에 미치는 영향
+
+Static Mesh 단계의 목적은 최종 구조를 확정하는 것이 아니라, **Shell Texturing의 Layer 계산과 Material 표현을 먼저 검증하는 것**이었습니다.
 
 ---
 
-## Material Logic
+## 2. Skeletal Mesh에서 추가된 조건
 
-Material Graph에서는 각 Shell Layer의 위치와 투명도를 계산합니다.
+Skeletal Mesh로 확장하면서 각 Layer가 Animation Pose를 따라가야 했고, 동시에 서로 다른 Material Parameter를 유지해야 했습니다.
+
+| 방식 | 이번 데모에서의 판단 |
+| --- | --- |
+| Instanced Static Mesh | Static Mesh의 Layer 값 전달 검증에 사용 |
+| Instanced Skinned Mesh | 다수 캐릭터 처리보다 Layer별 Material 값 전달이 우선인 이번 구조와 맞지 않아 사용하지 않음 |
+| Layer별 `SkeletalMeshComponent` | Leader Pose와 Layer별 Material Instance를 함께 사용하기 위해 선택 |
+
+여러 캐릭터를 한 번에 그리는 Crowd Rendering이 목적이 아니라, **한 캐릭터의 동일 Pose 위에 서로 다른 Layer 값을 가진 Shell을 겹치는 것**이 목적이었습니다.
+
+---
+
+## 3. Leader Pose와 Layer별 Material Instance
+
+`BP_ShellFur_Skeletal`의 Construction Script에서 `ShellCount`만큼 `SkeletalMeshComponent`를 생성합니다.
+
+```text
+SkeletalMeshComponent 생성
+  -> Source Mesh에 Attach
+  -> 동일 Skeletal Mesh Asset 설정
+  -> Leader Pose Component 지정
+  -> Collision 비활성화
+  -> Shell용 Shadow 설정 적용
+  -> Dynamic Material Instance 생성
+  -> ShellIndex / ShellCount 설정
+```
+
+Source Mesh만 Animation을 재생하고, 각 Shell은 Leader Pose를 통해 같은 Bone Transform을 사용합니다. Material Instance는 Shell마다 별도로 생성해 Pose 공유와 Layer Parameter 전달 책임을 분리했습니다.
+
+```text
+Animation 책임     : Source Mesh
+Bone Pose 공유      : Leader Pose
+Layer Geometry      : SkeletalMeshComponent
+Layer별 표현 값     : Dynamic Material Instance
+```
+
+---
+
+## 4. Material Graph
 
 ### Layer Ratio
 
-각 Shell이 안쪽 Layer인지, 바깥쪽 Layer인지 판단하기 위해 `LayerRatio`를 계산합니다.
+각 Shell이 Base Surface에서 얼마나 떨어질지 계산합니다.
 
 ```text
-LayerRatio = ShellIndex / max(ShellCount - 1, 1)
+LayerRatio = ShellIndex / ShellCount
 ```
 
 ### World Position Offset
 
-각 Shell Layer는 Vertex Normal 방향으로 확장됩니다.
+LayerRatio가 클수록 Vertex Normal 방향으로 더 멀리 이동합니다.
 
 ```text
-WPO = VertexNormalWS × ShellLength × LayerRatio
+WPO = VertexNormalWS × LayerRatio × OffsetScale
 ```
 
-이를 통해 동일한 Skeletal Mesh가 Layer별로 조금씩 바깥쪽으로 퍼지며,
-털의 부피감을 형성합니다.
+### Fur Pattern과 Growth Mask
 
-### Opacity / Growth Mask
-
-Opacity Mask는 털의 밀도를 제어하는 데 사용했습니다.
-
-Growth Mask는 털이 생성될 영역을 제한하기 위한 흑백 텍스처입니다.
+Fur Pattern Texture를 Opacity Mask에 사용해 Layer 사이에 털 가닥 형태의 빈 영역을 만들고, Growth Texture로 Fur가 적용될 부위를 제한합니다.
 
 ```text
-Black = Fur grows
-White = Fur suppressed
+GrowthMask = 1 - FurGrowthTexture.R
+FinalOpacity = FurPattern × GrowthMask
 ```
 
-Material에서는 Growth Mask 값을 반전하여 사용했습니다.
+| 입력 | Material에서의 역할 | 화면 결과 |
+| --- | --- | --- |
+| `ShellIndex` · `ShellCount` | LayerRatio 계산 | Layer별 확장 거리 결정 |
+| `VertexNormalWS` | WPO 방향 | Mesh 표면 바깥쪽으로 Shell 확장 |
+| `FurPattern` | Opacity Mask | Fur 가닥 분포와 밀도 표현 |
+| `FurGrowthTexture` | Growth Mask | Fur가 자라는 부위 제한 |
 
-```text
-GrowthMask = 1 - TextureSample.R
-```
-
-이 값을 Opacity Mask와 WPO에 결합하여,
-특정 부위에서는 털이 생성되지 않도록 처리했습니다.
-
----
-
-## Features
-
-* Shell Texturing 기반 Fur Rendering
-* Static Mesh Instancing 기반 Shell Layer 검증
-* SkeletalMeshComponent 기반 Multi-Layer Shell 구조
-* Leader Pose Component 기반 Skeletal Mesh Pose 동기화
-* Dynamic Material Instance 기반 ShellIndex 전달
-* WPO 기반 Shell 확장
-* Opacity Mask 기반 털 밀도 제어
-* Growth Mask 기반 부위별 털 생성 제한
-* ShellCount별 품질 및 성능 변화 확인
-
----
-
-## Performance Notes
-
-Skeletal Mesh 버전은 Blueprint만으로 Shell Texturing을 적용할 수 있다는 장점이 있지만,
-ShellCount만큼 `SkeletalMeshComponent`가 생성되므로 렌더링 비용이 증가합니다.
-
-```text
-Rendering Cost ≈ ShellCount × Material Slot Count × Render Pass Count
-```
-
-특히 다음 비용이 증가합니다.
-
-* SkeletalMeshComponent 수 증가
-* Draw Call 증가
-* Masked Material Overdraw 증가
-* Shell Layer 수에 따른 렌더링 부하 증가
-
-본 데모에서는 128 Layer까지 테스트했지만,
-실시간 데모 기준으로는 16~32 Layer 수준이 적절하다고 판단했습니다.
-
-| Shell Count | 용도                         |
-| ----------: | -------------------------- |
-|           8 | Low Quality / Far Distance |
-|          16 | Basic Quality              |
-|          32 | Recommended Demo Quality   |
-|          64 | High Quality Preview       |
-|         128 | Stress Test                |
-
----
-
-## Applied Optimization
-
-본 데모에서는 Blueprint 기반 프로토타입 수준에서 다음 최적화를 적용했습니다.
-
-* Shell Component Collision 비활성화
-* Shell Component Shadow 비활성화
-* Material Slot 최소화 방향으로 구성
-* 실시간 데모 기준 ShellCount 16~32 권장
-
----
-
-## Limitations
-
-현재 구조는 구현이 단순하고 Blueprint만으로 재현 가능하다는 장점이 있지만,
-실사용 기준에서는 다음과 같은 한계가 있습니다.
-
-* ShellCount 증가에 따른 Draw Call 증가
-* SkeletalMeshComponent 복제 방식의 구조적 비용
-* Masked Material Overdraw 비용
-* 다수 캐릭터에 적용하기 어려움
-* 상용 Fur Rendering 시스템 대비 제한적인 최적화
-
-따라서 실제 게임 적용을 위해서는 거리 기반 Shell LOD, Component Pooling,
-Custom Primitive Data 기반 파라미터 전달, 엔진 레벨 렌더링 최적화 등을 추가로 검토해야 합니다.
-
----
-
-## Images
-
-```text
-Images/
-├─ preview.png
-├─ beautyshot.png
-├─ shell_component_generation.png
-├─ material_layerratio_wpo.png
-├─ material_growth_mask.png
-└─ shell_count_test.png
+```mermaid
+flowchart LR
+    A["ShellIndex / ShellCount"] --> B["LayerRatio"]
+    B --> C["VertexNormalWS × Offset"]
+    C --> D["World Position Offset"]
+    E["Fur Pattern"] --> F["Opacity Mask"]
+    G["Growth Texture"] --> H["OneMinus"]
+    H --> F
+    D --> Result["Skeletal Fur"]
+    F --> Result
 ```
 
 ---
 
-## Asset Note
+## 5. Shell Count와 렌더링 비용
 
-본 저장소에는 외부 에셋 또는 라이선스가 필요한 Skeletal Mesh가 포함되지 않을 수 있습니다.
+Shell 수가 늘어나면 Layer 간격이 촘촘해져 Fur 실루엣은 연속적으로 보이지만, 구조적으로 다음 비용도 함께 증가합니다.
+
+| 항목 | Shell Count 증가 시 변화 |
+| --- | --- |
+| `SkeletalMeshComponent` | Layer 수만큼 Component 증가 |
+| Material 제출 | Shell별 Dynamic Material Instance 제출 증가 |
+| Masked Overdraw | 같은 화면 영역에 겹쳐 그리는 Pixel 증가 |
+| 관리 비용 | Construction과 Component 상태 관리 대상 증가 |
+
+현재 Skeletal Blueprint의 기본값은 **64 Shell**입니다. 이 값은 대표 결과를 만들기 위해 사용한 설정이며, 특정 Hardware에서의 최적값을 의미하지 않습니다.
 
 ```text
-The sample mesh used in the demo may not be included due to asset licensing.
-The material and blueprint setup can be applied to other compatible Skeletal Mesh assets.
+Rendering Cost는 대체로
+Shell Count × Material Slot × Render Pass
+증가 방향의 영향을 받습니다.
 ```
 
----
-
-## Reference
-
-* Unreal Engine `InstancedSkinnedMeshComponent` 검토
-* Shell Texturing 기반 Fur Rendering 개념
-* Unreal Engine Material Graph / World Position Offset
-* Unreal Engine Blueprint `Leader Pose Component`
+정확한 Frame Time·GPU Time은 별도로 측정하지 않았으므로 Layer별 성능 수치나 권장 개수를 주장하지 않습니다.
 
 ---
 
-## Summary
+## 구현 Asset
 
-이 프로젝트는 Unreal Engine에서 Shell Texturing 기반 Fur Rendering을 구현한 기술 데모입니다.
+| Asset | 경로·이름 |
+| --- | --- |
+| Demo Map | `/Game/ShellTexture/Demoroom/SandboxMap` |
+| Skeletal Fur Blueprint | `/Game/ShellTexture/BP_ShellFur_Skeletal` |
+| Skeletal Mesh | `SK_GermanShepherd_01` |
+| Material | `M_ShellTexturing_Skeletal` |
 
-Static Mesh에서 검증한 Shell Rendering 구조를 Skeletal Mesh에 확장하는 과정에서,
-Skeletal Mesh 파이프라인의 제약을 확인했고,
-Blueprint 기반 Multi-Layer SkeletalMeshComponent 구조로 우회 구현했습니다.
+## 실행
 
-이를 통해 Shell Layer별 WPO, Opacity Mask, Growth Mask 제어를 적용하고,
-ShellCount 증가에 따른 품질과 성능 한계를 확인했습니다.
+```text
+1. Unreal Engine 5.7에서 FurRendering.uproject 열기
+2. /Game/ShellTexture/Demoroom/SandboxMap 열기
+3. BP_ShellFur_Skeletal의 ShellCount와 Material Parameter 확인
+4. Play 또는 Editor Viewport에서 Animation과 Shell 동기화 확인
+```
+
+외부 Skeletal Mesh와 Texture의 재배포·사용 범위는 각 원본 Asset License를 따릅니다.
+
+---
+
+## 적용 범위와 한계
+
+- Blueprint와 Material Graph로 구현한 단일 캐릭터 대상 기술 데모입니다.
+- Frame Time과 GPU Time을 측정하지 않았습니다.
+- 다수 캐릭터 동시 적용 성능을 검증하지 않았습니다.
+- Shell 수만큼 `SkeletalMeshComponent`와 Material 제출이 증가합니다.
+- Masked Material을 여러 겹 렌더링하므로 Overdraw 비용이 증가합니다.
+- 상용 Fur System, Strand 기반 Hair, 엔진 레벨 Renderer 최적화를 대체하는 구조가 아닙니다.
+
+이 프로젝트는 렌더링 기능을 과장하기보다, **Static Mesh에서 검증한 표현 기법을 Skeletal Mesh의 Pose 공유 구조에 맞게 확장하고, 품질과 비용의 경계를 확인한 과정**을 보여주는 데 목적이 있습니다.
+
+## 라이선스
+
+Copyright (c) 2026 Real-Time Fur Rendering. All rights reserved.
